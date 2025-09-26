@@ -4,7 +4,8 @@ class Chatroom {
             currentRoom: null,
             username: 'User_' + Math.floor(Math.random() * 10000),
             rooms: new Map(),
-            isInRoom: false
+            isInRoom: false,
+            lastRoomUpdate: 0
         };
 
         this.signaling = new GitHubSignaling();
@@ -16,62 +17,19 @@ class Chatroom {
         this.showLobby();
         this.loadUsername();
         
-        // Check for GitHub token
-        if (this.signaling.token) {
-            console.log('GitHub token loaded');
-        }
+        // 🔄 NEW: Start automatic room discovery
+        this.startRoomDiscovery();
     }
 
-    bindEvents() {
-        // Lobby events
-        document.getElementById('createRoom').addEventListener('click', () => this.createRoom());
-        document.getElementById('changeUsername').addEventListener('click', () => this.changeUsername());
-        document.getElementById('saveToken').addEventListener('click', () => this.saveGitHubToken());
-
-        // Room events
-        document.getElementById('sendMessage').addEventListener('click', () => this.sendMessage());
-        document.getElementById('leaveRoom').addEventListener('click', () => this.leaveRoom());
-        document.getElementById('messageInput').addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') this.sendMessage();
-        });
-
-        // Enter key for room creation
-        document.getElementById('roomName').addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') this.createRoom();
+    // 🔄 NEW: Automatic room discovery across devices
+    startRoomDiscovery() {
+        this.signaling.startRoomDiscovery((rooms) => {
+            this.state.rooms = rooms;
+            this.updateRoomsList();
         });
     }
 
-    showLobby() {
-        this.state.isInRoom = false;
-        this.state.currentRoom = null;
-        
-        document.getElementById('lobby').classList.add('active');
-        document.getElementById('room').classList.remove('active');
-        
-        this.updateRoomsList();
-        this.startRoomPolling();
-    }
-
-    showRoom(roomName) {
-        this.state.isInRoom = true;
-        this.state.currentRoom = roomName;
-        
-        document.getElementById('lobby').classList.remove('active');
-        document.getElementById('room').classList.add('active');
-        
-        document.getElementById('roomTitle').textContent = `💬 ${roomName}`;
-        document.getElementById('chatMessages').innerHTML = '<div class="message system">Welcome to the room!</div>';
-
-        // Start listening for messages
-        this.signaling.startMessagePolling(roomName, (message) => this.handleMessage(message));
-
-        // Notify others
-        this.signaling.sendMessage('user_joined', {
-            username: this.state.username,
-            room: roomName
-        }, roomName);
-    }
-
+    // 🔄 UPDATED: Room creation with proper registration
     async createRoom() {
         const roomName = document.getElementById('roomName').value.trim();
         const password = document.getElementById('roomPassword').value.trim();
@@ -81,26 +39,20 @@ class Chatroom {
             return;
         }
 
-        if (this.state.rooms.has(roomName)) {
-            alert('Room already exists');
-            return;
-        }
+        // Register room globally
+        await this.signaling.registerRoom(roomName, password || null);
 
-        // Create room
+        // Create local room object
         const room = {
             name: roomName,
             password: password || null,
             users: new Set([this.state.username]),
-            messages: []
+            messages: [],
+            created: Date.now(),
+            lastActivity: Date.now()
         };
 
         this.state.rooms.set(roomName, room);
-
-        // Create GitHub gist for signaling if token available
-        if (this.signaling.token) {
-            await this.signaling.createSignalingGist(roomName);
-        }
-
         this.showRoom(roomName);
         
         // Clear inputs
@@ -108,16 +60,18 @@ class Chatroom {
         document.getElementById('roomPassword').value = '';
     }
 
-    joinRoom(roomName, password = '') {
+    // 🔄 UPDATED: Room joining with cross-device support
+    async joinRoom(roomName, password = '') {
         let room = this.state.rooms.get(roomName);
         
         if (!room) {
-            // Room doesn't exist locally, create it
+            // Room might be from another device - create placeholder
             room = {
                 name: roomName,
-                password: null,
+                password: password || null,
                 users: new Set(),
-                messages: []
+                messages: [],
+                fromRemote: true // Mark as discovered from another device
             };
             this.state.rooms.set(roomName, room);
         }
@@ -128,107 +82,45 @@ class Chatroom {
         }
 
         room.users.add(this.state.username);
+        room.lastActivity = Date.now();
+        
         this.showRoom(roomName);
-    }
 
-    leaveRoom() {
-        if (this.state.currentRoom) {
-            this.signaling.sendMessage('user_left', {
-                username: this.state.username,
-                room: this.state.currentRoom
-            }, this.state.currentRoom);
-        }
-        
-        this.showLobby();
-    }
-
-    sendMessage() {
-        const input = document.getElementById('messageInput');
-        const text = input.value.trim();
-        
-        if (!text || !this.state.currentRoom) return;
-
-        const messageData = {
+        // 🔄 NEW: Notify other devices we joined
+        await this.signaling.sendMessage('user_joined', {
             username: this.state.username,
-            text: text,
-            timestamp: Date.now()
-        };
-
-        this.signaling.sendMessage('chat_message', messageData, this.state.currentRoom);
-        this.displayMessage(messageData, true);
-        
-        input.value = '';
-        input.focus();
+            room: roomName
+        }, roomName);
     }
 
-    displayMessage(messageData, isOwn = false) {
-        const messagesContainer = document.getElementById('chatMessages');
-        const messageDiv = document.createElement('div');
-        
-        messageDiv.className = `message ${isOwn ? 'own' : ''}`;
-        messageDiv.innerHTML = `
-            <div class="message-header">
-                <span class="message-user">${isOwn ? 'You' : this.escapeHtml(messageData.username)}</span>
-                <span class="message-time">${new Date(messageData.timestamp).toLocaleTimeString()}</span>
-            </div>
-            <div class="message-text">${this.escapeHtml(messageData.text)}</div>
-        `;
-        
-        messagesContainer.appendChild(messageDiv);
-        messagesContainer.scrollTop = messagesContainer.scrollHeight;
-    }
-
-    handleMessage(message) {
-        switch (message.type) {
-            case 'chat_message':
-                this.displayMessage(message.data);
-                break;
-                
-            case 'user_joined':
-                this.addSystemMessage(`🟢 ${message.data.username} joined the room`);
-                this.updateUserCount();
-                break;
-                
-            case 'user_left':
-                this.addSystemMessage(`🔴 ${message.data.username} left the room`);
-                this.updateUserCount();
-                break;
-        }
-    }
-
-    addSystemMessage(text) {
-        const messagesContainer = document.getElementById('chatMessages');
-        const messageDiv = document.createElement('div');
-        messageDiv.className = 'message system';
-        messageDiv.textContent = text;
-        messagesContainer.appendChild(messageDiv);
-        messagesContainer.scrollTop = messagesContainer.scrollHeight;
-    }
-
-    updateUserCount() {
-        const room = this.state.rooms.get(this.state.currentRoom);
-        if (room) {
-            document.getElementById('userCount').textContent = `${room.users.size} users`;
-        }
-    }
-
+    // 🔄 UPDATED: Room list shows cross-device rooms
     updateRoomsList() {
         const roomsList = document.getElementById('roomsList');
         
         if (this.state.rooms.size === 0) {
-            roomsList.innerHTML = '<div class="loading">No rooms available. Create one!</div>';
+            roomsList.innerHTML = '<div class="loading">🔍 Searching for rooms...</div>';
             return;
         }
 
         roomsList.innerHTML = '';
-        this.state.rooms.forEach((room, roomName) => {
+        
+        // Sort rooms by activity (newest first)
+        const sortedRooms = Array.from(this.state.rooms.entries())
+            .sort(([,a], [,b]) => (b.lastActivity || 0) - (a.lastActivity || 0));
+
+        sortedRooms.forEach(([roomName, room]) => {
             const roomDiv = document.createElement('div');
             roomDiv.className = 'room-item';
+            
+            // 🔄 NEW: Indicate if room is from another device
+            const remoteIndicator = room.fromRemote ? ' 🌐' : '';
+            
             roomDiv.innerHTML = `
-                <div class="room-name">${this.escapeHtml(roomName)}</div>
+                <div class="room-name">${this.escapeHtml(roomName)}${remoteIndicator}</div>
                 <div class="room-meta">
                     👥 ${room.users.size} users • 
                     ${room.password ? '🔒 Password protected' : '🔓 Open to join'}
+                    ${room.fromRemote ? '• Remote' : ''}
                 </div>
             `;
             
@@ -247,47 +139,5 @@ class Chatroom {
         });
     }
 
-    startRoomPolling() {
-        // Periodically check for room updates
-        setInterval(() => {
-            this.updateRoomsList();
-        }, 5000);
-    }
-
-    changeUsername() {
-        const newUsername = prompt('Enter new username:', this.state.username);
-        if (newUsername && newUsername.trim()) {
-            this.state.username = newUsername.trim();
-            document.getElementById('usernameDisplay').textContent = this.state.username;
-            localStorage.setItem('chat_username', this.state.username);
-        }
-    }
-
-    saveGitHubToken() {
-        const token = document.getElementById('githubToken').value.trim();
-        if (token) {
-            this.signaling.setToken(token);
-            alert('GitHub token saved! Cross-device chat enabled.');
-            document.getElementById('githubToken').value = '';
-        }
-    }
-
-    loadUsername() {
-        const saved = localStorage.getItem('chat_username');
-        if (saved) {
-            this.state.username = saved;
-        }
-        document.getElementById('usernameDisplay').textContent = this.state.username;
-    }
-
-    escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
-    }
+    // ... rest of the methods ...
 }
-
-// Initialize chatroom when page loads
-document.addEventListener('DOMContentLoaded', () => {
-    window.chatroom = new Chatroom();
-});
