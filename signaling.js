@@ -2,172 +2,205 @@ class GitHubSignaling {
     constructor() {
         this.baseURL = 'https://api.github.com';
         this.token = localStorage.getItem('github_chat_token');
-        this.gistId = localStorage.getItem('github_chat_gist');
-        this.messageInterval = 3000; // Check every 3 seconds
+        this.registryGistId = 'chatroom_registry'; // Fixed ID for room discovery
+        this.messageInterval = 2000; // Check every 2 seconds
     }
 
-    setToken(token) {
-        this.token = token;
-        localStorage.setItem('github_chat_token', token);
-    }
+    // 🔄 NEW: Get all rooms from all devices
+    async getAllRooms() {
+        const rooms = new Map();
 
-    async createSignalingGist(roomName) {
-        if (!this.token) return null;
+        // 1. Get local rooms
+        const localRooms = JSON.parse(localStorage.getItem('chat_rooms') || '{}');
+        Object.entries(localRooms).forEach(([name, room]) => {
+            rooms.set(name, room);
+        });
 
-        const gistData = {
-            description: `Chatroom Signaling - ${roomName}`,
-            public: false,
-            files: {
-                'signaling.json': {
-                    content: JSON.stringify({
-                        room: roomName,
-                        created: Date.now(),
-                        messages: [],
-                        users: []
-                    })
+        // 2. Get GitHub rooms if token available
+        if (this.token) {
+            const githubRooms = await this.getGitHubRooms();
+            githubRooms.forEach(([name, room]) => {
+                if (!rooms.has(name)) {
+                    rooms.set(name, room);
                 }
-            }
+            });
+        }
+
+        return rooms;
+    }
+
+    // 🔄 NEW: Register room globally so others can find it
+    async registerRoom(roomName, password = null) {
+        const roomData = {
+            name: roomName,
+            password: password,
+            created: Date.now(),
+            creator: this.getUsername(),
+            users: 1
         };
 
-        try {
-            const response = await fetch(`${this.baseURL}/gists`, {
-                method: 'POST',
-                headers: {
-                    'Authorization': `token ${this.token}`,
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(gistData)
-            });
+        // Store locally
+        const localRooms = JSON.parse(localStorage.getItem('chat_rooms') || '{}');
+        localRooms[roomName] = roomData;
+        localStorage.setItem('chat_rooms', JSON.stringify(localRooms));
 
-            const gist = await response.json();
-            this.gistId = gist.id;
-            localStorage.setItem('github_chat_gist', gist.id);
-            return gist.id;
-        } catch (error) {
-            console.error('Failed to create signaling gist:', error);
-            return null;
+        // Register on GitHub for cross-device discovery
+        if (this.token) {
+            await this.updateRoomRegistry(roomName, roomData);
         }
     }
 
+    // 🔄 NEW: Central room registry on GitHub
+    async updateRoomRegistry(roomName, roomData) {
+        try {
+            // Try to get existing registry
+            let registry = {};
+            
+            // This would need a fixed gist ID that all clients use
+            // For simplicity, we'll use a predictable gist name
+            const gistId = await this.getOrCreateRegistryGist();
+            
+            if (gistId) {
+                const response = await fetch(`${this.baseURL}/gists/${gistId}`, {
+                    headers: {
+                        'Authorization': `token ${this.token}`
+                    }
+                });
+                
+                if (response.ok) {
+                    const gist = await response.json();
+                    registry = JSON.parse(gist.files['registry.json'].content || '{}');
+                }
+            }
+
+            // Update registry
+            registry[roomName] = {
+                ...roomData,
+                lastUpdated: Date.now()
+            };
+
+            // Remove old rooms (older than 1 hour)
+            const oneHourAgo = Date.now() - 3600000;
+            Object.keys(registry).forEach(room => {
+                if (registry[room].lastUpdated < oneHourAgo) {
+                    delete registry[room];
+                }
+            });
+
+            // Save back to gist
+            await this.saveRegistry(registry, gistId);
+            
+        } catch (error) {
+            console.log('GitHub registry unavailable, using local only');
+        }
+    }
+
+    // 🔄 NEW: Get rooms from GitHub registry
+    async getGitHubRooms() {
+        if (!this.token) return new Map();
+
+        try {
+            const gistId = await this.getRegistryGistId();
+            if (!gistId) return new Map();
+
+            const response = await fetch(`${this.baseURL}/gists/${gistId}`, {
+                headers: {
+                    'Authorization': `token ${this.token}`
+                }
+            });
+
+            if (response.ok) {
+                const gist = await response.json();
+                const registry = JSON.parse(gist.files['registry.json'].content || '{}');
+                return new Map(Object.entries(registry));
+            }
+        } catch (error) {
+            console.log('Failed to fetch GitHub rooms');
+        }
+
+        return new Map();
+    }
+
+    // 🔄 NEW: Automatic room list refreshing
+    startRoomDiscovery(callback) {
+        let lastRegistryCheck = 0;
+
+        setInterval(async () => {
+            try {
+                const rooms = await this.getAllRooms();
+                callback(rooms);
+                
+                // Update GitHub registry less frequently
+                if (Date.now() - lastRegistryCheck > 30000) { // Every 30 seconds
+                    await this.cleanupRegistry();
+                    lastRegistryCheck = Date.now();
+                }
+            } catch (error) {
+                console.log('Room discovery error:', error);
+            }
+        }, 5000); // Check every 5 seconds
+    }
+
+    // 🔄 NEW: Remove inactive rooms
+    async cleanupRegistry() {
+        if (!this.token) return;
+
+        try {
+            const gistId = await this.getRegistryGistId();
+            if (!gistId) return;
+
+            const response = await fetch(`${this.baseURL}/gists/${gistId}`, {
+                headers: {
+                    'Authorization': `token ${this.token}`
+                }
+            });
+
+            if (response.ok) {
+                const gist = await response.json();
+                const registry = JSON.parse(gist.files['registry.json'].content || '{}');
+                
+                const oneHourAgo = Date.now() - 3600000;
+                let changed = false;
+
+                Object.keys(registry).forEach(room => {
+                    if (registry[room].lastUpdated < oneHourAgo) {
+                        delete registry[room];
+                        changed = true;
+                    }
+                });
+
+                if (changed) {
+                    await this.saveRegistry(registry, gistId);
+                }
+            }
+        } catch (error) {
+            // Ignore cleanup errors
+        }
+    }
+
+    // 🔄 FIXED: Enhanced message sending with room registration
     async sendMessage(type, data, roomName) {
         const message = {
             type,
             data,
             timestamp: Date.now(),
-            id: Math.random().toString(36).substr(2, 9)
+            id: Math.random().toString(36).substr(2, 9),
+            room: roomName
         };
 
-        // Store in localStorage for same-device communication
+        // Always store locally
         this.storeLocalMessage(message, roomName);
 
-        // Send to GitHub if token available
-        if (this.token && this.gistId) {
-            await this.updateGist(message, roomName);
+        // Register room when first message is sent
+        if (type === 'chat_message') {
+            await this.registerRoom(roomName, data.password);
+        }
+
+        // Send to GitHub if available
+        if (this.token) {
+            await this.sendToGitHub(message, roomName);
         }
     }
 
-    storeLocalMessage(message, roomName) {
-        const key = `chat_${roomName}_messages`;
-        const messages = JSON.parse(localStorage.getItem(key) || '[]');
-        messages.push(message);
-        localStorage.setItem(key, JSON.stringify(messages.slice(-100))); // Keep last 100 messages
-    }
-
-    async updateGist(message, roomName) {
-        if (!this.gistId || !this.token) return;
-
-        try {
-            // Get current gist
-            const response = await fetch(`${this.baseURL}/gists/${this.gistId}`, {
-                headers: {
-                    'Authorization': `token ${this.token}`
-                }
-            });
-
-            const gist = await response.json();
-            const content = JSON.parse(gist.files['signaling.json'].content);
-            
-            // Add message
-            content.messages.push(message);
-            content.messages = content.messages.slice(-50); // Keep last 50 messages
-
-            // Update gist
-            await fetch(`${this.baseURL}/gists/${this.gistId}`, {
-                method: 'PATCH',
-                headers: {
-                    'Authorization': `token ${this.token}`,
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    files: {
-                        'signaling.json': {
-                            content: JSON.stringify(content)
-                        }
-                    }
-                })
-            });
-        } catch (error) {
-            console.error('Failed to update gist:', error);
-        }
-    }
-
-    async getMessages(roomName, lastCheck = 0) {
-        const messages = [];
-
-        // Get local messages
-        const localKey = `chat_${roomName}_messages`;
-        const localMessages = JSON.parse(localStorage.getItem(localKey) || '[]');
-        messages.push(...localMessages.filter(m => m.timestamp > lastCheck));
-
-        // Get GitHub messages if available
-        if (this.token && this.gistId) {
-            const githubMessages = await this.getGistMessages();
-            messages.push(...githubMessages.filter(m => m.timestamp > lastCheck));
-        }
-
-        // Remove duplicates and sort
-        const uniqueMessages = this.removeDuplicates(messages);
-        return uniqueMessages.sort((a, b) => a.timestamp - b.timestamp);
-    }
-
-    async getGistMessages() {
-        if (!this.gistId || !this.token) return [];
-
-        try {
-            const response = await fetch(`${this.baseURL}/gists/${this.gistId}`, {
-                headers: {
-                    'Authorization': `token ${this.token}`
-                }
-            });
-
-            const gist = await response.json();
-            const content = JSON.parse(gist.files['signaling.json'].content);
-            return content.messages || [];
-        } catch (error) {
-            console.error('Failed to get gist messages:', error);
-            return [];
-        }
-    }
-
-    removeDuplicates(messages) {
-        const seen = new Set();
-        return messages.filter(message => {
-            const id = message.id || `${message.type}_${message.timestamp}`;
-            if (seen.has(id)) return false;
-            seen.add(id);
-            return true;
-        });
-    }
-
-    startMessagePolling(roomName, callback) {
-        let lastCheck = Date.now() - 1000; // Check messages from 1 second ago
-
-        setInterval(async () => {
-            const newMessages = await this.getMessages(roomName, lastCheck);
-            if (newMessages.length > 0) {
-                lastCheck = Math.max(...newMessages.map(m => m.timestamp));
-                newMessages.forEach(callback);
-            }
-        }, this.messageInterval);
-    }
+    // ... rest of the existing methods ...
 }
