@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GitHub P2P Chatrooms</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Lobby View -->
+        <div id="lobby" class="view active">
+            <div class="header">
+                <h1>💬 GitHub Chatrooms</h1>
+                <div class="user-info">
+                    <span id="usernameDisplay">User_1234</span>
+                    <button id="changeUsername">Change</button>
+                </div>
+            </div>
+
+            <div class="section">
+                <h3>Create Room</h3>
+                <div class="input-group">
+                    <input type="text" id="roomName" placeholder="Room name" maxlength="50">
+                    <input type="password" id="roomPassword" placeholder="Password (optional)">
+                    <button id="createRoom" class="btn-primary">Create Room</button>
+                </div>
+            </div>
+
+            <div class="section">
+                <h3>Available Rooms</h3>
+                <div id="roomsList" class="rooms-container">
+                    <div class="loading">Loading rooms...</div>
+                </div>
+            </div>
+
+            <div class="github-config">
+                <h3>GitHub Setup (Optional)</h3>
+                <p>Add your GitHub token for better cross-device sync</p>
+                <input type="password" id="githubToken" placeholder="GitHub Personal Token">
+                <button id="saveToken">Save Token</button>
+            </div>
+        </div>
+
+        <!-- Room View -->
+        <div id="room" class="view">
+            <div class="header">
+                <h1 id="roomTitle">💬 Room Name</h1>
+                <div class="room-info">
+                    <span id="userCount">1 user</span>
+                    <button id="leaveRoom" class="btn-danger">Leave Room</button>
+                </div>
+            </div>
+
+            <div id="chatMessages" class="messages-container"></div>
+
+            <div class="message-input">
+                <input type="text" id="messageInput" placeholder="Type a message..." maxlength="500">
+                <button id="sendMessage" class="btn-primary">Send</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="signaling.js"></script>
+    <script src="chatroom.js"></script>
+</body>
+</html>
